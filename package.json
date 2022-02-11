@@ -1,0 +1,34 @@
+{
+  "name": "oswap-v2-aa",
+  "version": "0.1.0",
+  "scripts": {
+    "test": "mocha --opts test/mocha.opts --require test/bootload.js",
+    "test:all": "mocha --opts test/mocha.opts --require test/bootload.js test/*.test.oscript.js",
+    "lint": "node ./node_modules/.bin/eslint --ext .js --max-warnings=0 test"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=8"
+  },
+  "dependencies": {
+    "aa-testkit": "git+https://github.com/valyakin/aa-testkit.git",
+    "chai": "^4.2.0",
+    "chai-deep-closeto": "^0.1.1",
+    "mocha": "^6.2.0"
+  },
+  "devDependencies": {
+    "eslint": "^6.3.0",
+    "eslint-config-standard": "^14.1.0",
+    "eslint-plugin-chai-friendly": "^0.4.1",
+    "eslint-plugin-import": "^2.18.2",
+    "eslint-plugin-mocha": "^6.1.1",
+    "eslint-plugin-node": "^10.0.0",
+    "eslint-plugin-promise": "^4.2.1",
+    "eslint-plugin-standard": "^4.0.1"
+  },
+  "resolutions": {
+    "chalk": "^3.0.0",
+    "cli-width": "^2.2.1",
+    "level-rocksdb": "^4.0.0"
+  }
+}

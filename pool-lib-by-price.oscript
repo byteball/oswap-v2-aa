@@ -1,0 +1,398 @@
+{
+	getters: `{
+
+		$get_leverages = () => [2, 5, 10, 20, 50, 100];
+
+		$singularity_threshold = 0.02;
+
+		$trade_merge_period = 1; // seconds
+
+		$update_recent_data = ($recent, $p, $final_p, $trigger_initial_address, $tax_token, $traded_amount, $paid_tax, $period_length) => {
+			$period_start_ts = floor(timestamp / $period_length) * $period_length;
+			$pmin = min($p, $final_p);
+			$pmax = max($p, $final_p);
+			if (+$recent.current.start_ts < $period_start_ts){
+				$recent.prev = $recent.current;
+				$recent.current = {start_ts: $period_start_ts, pmin: $pmin, pmax: $pmax};
+			}
+			else{
+				$recent.current.pmin = min($recent.current.pmin, $pmin);
+				$recent.current.pmax = max($recent.current.pmax, $pmax);
+			}
+			if ($recent.last_trade AND $recent.last_trade.address == $trigger_initial_address AND $recent.last_ts >= timestamp - $trade_merge_period){ // closely following trades are merged into one trade
+				$recent.last_trade.pmin = min($recent.last_trade.pmin, $pmin);
+				$recent.last_trade.pmax = max($recent.last_trade.pmax, $pmax);
+				$recent.last_trade.amounts[$tax_token] = $recent.last_trade.amounts[$tax_token] + $traded_amount;
+				$recent.last_trade.paid_taxes[$tax_token] = $recent.last_trade.paid_taxes[$tax_token] + $paid_tax;
+			}
+			else{
+				$amounts = {x:0, y:0};
+				$paid_taxes = {x:0, y:0};
+				$amounts[$tax_token] = $traded_amount;
+				$paid_taxes[$tax_token] = $paid_tax;
+				$recent.last_trade = {
+					address: $trigger_initial_address,
+					pmin: $pmin,
+					pmax: $pmax,
+					amounts: $amounts,
+					paid_taxes: $paid_taxes,
+				};
+			}
+			$recent.last_ts = timestamp;
+		};
+
+		// X, Y through P:
+
+		// without LP leverage (Lambda)
+		$get_final_xy = ($X, $Y, $P, $final_P, $X0, $Y0, $pool_props, $inverted) => {
+			require($final_P >= $P, "not selling Y");
+		//	log('get_final_xy', $X, $Y, $P, $final_P, $X0, $Y0);
+			$a = $inverted ? $pool_props.beta : $pool_props.alpha; // alpha
+			$b = 1 - $a; // beta
+			$final_X = ($X + $X0) * ($P/$final_P)^$b - $X0;
+			$final_Y = $b/$a * $final_P * ($final_X + $X0) - $Y0;
+			$deltaX = $X - $final_X;
+			require($final_X >= 0, "bad final_X " || $final_X);
+			require($final_Y >= 0, "bad final_Y " || $final_Y);
+			require($deltaX >= 0, "bad deltaX " || $deltaX);
+			{
+				X: $final_X,
+				Y: $final_Y,
+			}
+		};
+
+		// along x means keeping x fully leveraged (y underleveraged)
+		$get_final_xy_along_x = ($X, $Y, $P, $final_P, $pool_props, $inverted) => {
+			require($final_P >= $P, "along X: not selling Y");
+			$a = $inverted ? $pool_props.beta : $pool_props.alpha; // alpha
+			$b = 1 - $a; // beta
+			$final_X = $X * ($P/$final_P)^($b*$pool_props.Lambda);
+			$final_Y = $b/$a * $final_P * $final_X;
+			{
+				X: $final_X,
+				Y: $final_Y,
+			}
+		};
+
+		// along y means keeping y fully leveraged (x underleveraged)
+		$get_final_xy_along_y = ($X, $Y, $P, $final_P, $pool_props, $inverted) => {
+			require($final_P >= $P, "along Y: not selling Y");
+			$a = $inverted ? $pool_props.beta : $pool_props.alpha; // alpha
+			$b = 1 - $a; // beta
+			$final_Y = $Y * ($final_P/$P)^($a*$pool_props.Lambda);
+			$final_X = $a/$b * $final_Y / $final_P;
+			{
+				X: $final_X,
+				Y: $final_Y,
+			}
+		};
+
+
+
+
+		$add_net_balance_without_changing_price = ($balances, $profits, $side, $amount, $Lambda) => {
+			if ($amount == 0)
+				return;
+			if ($Lambda == 1){
+				$profits[$side] = $profits[$side] + $amount;
+				return;
+			}
+
+			$opposite = $side == 'x' ? 'y' : 'x';
+			$side_n = $side || 'n';
+			$opposite_n = $opposite || 'n';
+			
+			$Xn = $balances[$side_n];
+			$Yn = $balances[$opposite_n];
+			$X = $balances[$side];
+			$Y = $balances[$opposite];
+			
+			$underleveraged = $Xn > ceil($X/$Lambda);
+			$delta_Xn = $amount;
+		//	$delta_Yn = 0;
+			// the price doesn't change as X and Y grow proportionally
+			if (!$underleveraged){
+				// Y is underleveraged, increase Y proportionally while keeping Yn intact
+				$full_delta_Y = $Y * $delta_Xn/$Xn;
+				if ($Y + $full_delta_Y > $Yn * $Lambda){ // would overshoot and make Y overleveraged
+				//	bounce('overshoot');
+					$ratio = $Yn * $Lambda / $Y - 1;
+					$delta_X = $ratio * $X;
+					$delta_Y = $ratio * $Y;
+				}
+				else{
+					$delta_X = $delta_Xn * $Lambda;
+					$delta_Y = $full_delta_Y;
+				}
+			}
+			else{
+				$delta_X = 0; // only net X gets increased
+				$delta_Y = 0;
+			}
+		//	log('add_net_balance_without_changing_price', {side: $side, amount: $amount, delta_X: $delta_X, delta_Y: $delta_Y, Xn: $Xn, Y: $Y});
+
+			$balances[$side_n] = $balances[$side_n] + $delta_Xn;
+		//	$balances[$opposite_n] = $balances[$opposite_n] + $delta_Yn;
+			$balances[$side] = $balances[$side] + $delta_X;
+			$balances[$opposite] = $balances[$opposite] + $delta_Y;
+		};
+
+
+
+
+
+		$pow = ($precomputed, $power) => {
+			require(typeof($precomputed[$power]) == 'number', "no precomputed power " || $power);
+			$precomputed[$power]
+		};
+		$precompute = $v => {
+			$pre = {};
+			$pre['2'] = $v * $v;
+			$pre['5'] = $pre['2'] * $pre['2'] * $v;
+			$pre['10'] = $pre['5'] * $pre['5'];
+			$pre['20'] = $pre['10'] * $pre['10'];
+			$pre['50'] = $pre['20'] * $pre['20'] * $pre['10'];
+			$pre['100'] = $pre['50'] * $pre['50'];
+			$pre
+		};
+
+		$update_leveraged_balances = ($l_balances, $P, $final_P, $inverted) => {
+			$ratio = $final_P/$P;
+			$ratio_powers = $precompute($ratio);
+
+			$totals = {
+				delta_XL: 0, // (L>0) X added to the L-pools (bought from the swap pool) minus (L<0) new X borrowed by the L-pools (sent to the swap pool for buying Y)
+				delta_YL: 0, // (L>0) Y added to the L-pools (bought from the swap pool) minus (L<0) new Y borrowed by the L-pools (sent to the swap pool for buying X)
+				XL_denom: 0,
+				YL_denom: 0,
+			}; // if inverted, XL corresponds to y, YL to x
+			foreach($get_leverages(), 6, ($L) => {
+				$allyL = $inverted ? -$L : $L;
+				$balance = $l_balances[$allyL||'x'].balance;
+				$obalance = $l_balances[-$allyL||'x'].balance;
+				if (!$balance AND !$obalance)
+					return;
+				$ratio_L1 = $pow($ratio_powers, $L) / $ratio;
+				$debt_ratio = ($L-1)/$L;
+				if ($balance) {
+					$delta_XL_balance = $balance * ($ratio_L1 - 1);
+					$new_XL_balance = $balance + $delta_XL_balance;
+					$l_balances[$allyL||'x'].balance = $new_XL_balance;
+					$delta_YL_balance = -($new_XL_balance * $final_P - $balance * $P) * $debt_ratio; // borrowed
+					$totals.delta_XL = $totals.delta_XL + $delta_XL_balance;
+					$totals.delta_YL = $totals.delta_YL + $delta_YL_balance;
+					$totals.XL_denom = $totals.XL_denom + $new_XL_balance * ($L-1);
+				}
+				if ($obalance) { // e.g. L=-2
+					$delta_YL_obalance = $obalance * (1/$ratio_L1 - 1);
+					$new_YL_obalance = $obalance + $delta_YL_obalance;
+					$l_balances[-$allyL||'x'].balance = $new_YL_obalance;
+					$delta_XL_obalance = -($new_YL_obalance / $final_P - $obalance / $P) * $debt_ratio; // borrowed
+					$totals.delta_YL = $totals.delta_YL + $delta_YL_obalance;
+					$totals.delta_XL = $totals.delta_XL + $delta_XL_obalance;
+					$totals.YL_denom = $totals.YL_denom + $new_YL_obalance * ($L-1);
+				}
+			});
+			$totals
+		};
+
+
+
+		$swap = ($balances, $l_balances, $profits, $recent, $x0, $y0, $y_in, $in_delta_Yn, $final_P, $received_amount_Y, $min_amount_out, $trigger_initial_address, $pool_props) => {
+			
+			require(!$in_delta_Yn, "no delta Yn please, this is swap by P");
+			
+			$alpha = $pool_props.alpha;
+			$beta = $pool_props.beta;
+			$Lambda = $pool_props.Lambda;
+
+			$xn = $balances.xn;
+			$yn = $balances.yn;
+			$x = $balances.x;
+			$y = $balances.y;
+			
+			if ($y_in){
+				$inverted = false;
+				$X = $x;
+				$Y = $y;
+				$Xn = $xn;
+				$Yn = $yn;
+				$X0 = $x0;
+				$Y0 = $y0;
+				$a = $alpha;
+				$b = $beta;
+				$in_token = 'y';
+				$out_token = 'x';
+			}
+			else{ // x <-> y swap their roles. Uppercase X, Y, and P refer to invertable values
+				$inverted = true;
+				$X = $y;
+				$Y = $x;
+				$Xn = $yn;
+				$Yn = $xn;
+				$X0 = $y0;
+				$Y0 = $x0;
+				$a = $beta;
+				$b = $alpha;
+				$in_token = 'x';
+				$out_token = 'y';
+			}
+			$P = $a/$b * ($Y + $Y0) / ($X + $X0); // price of X in terms of Y
+			require($final_P > $P, "price should increase, current " || $P || ", target " || $final_P);
+
+			if ($Lambda > 1){
+				$underleveraged = $Xn > ceil($X/$Lambda);
+			}
+
+			if ($Lambda == 1){
+				$final = $get_final_xy($X, $Y, $P, $final_P, $X0, $Y0, $pool_props, $inverted);
+				$final_X = $final.X;
+				$final_Y = $final.Y;
+				$final_Xn = $final_X;
+				$final_Yn = $final_Y;
+			}
+			else if (!$underleveraged){ // along X
+				$final = $get_final_xy_along_x($X, $Y, $P, $final_P, $pool_props, $inverted);
+				$final_X = $final.X;
+				$final_Y = $final.Y;
+				$final_Xn = $final_X/$Lambda;
+				$delta_Y = $final_Y - $Y;
+				$delta_Yn = -$a/($b*$Lambda-1)*$delta_Y;
+				$final_Yn = $Yn + $delta_Yn;
+				require($final_Yn > 0, "fully leveraged: negative final_Yn="||$final_Yn);
+			}
+			else if ($underleveraged){
+				$inflection_P = $P * ( $Lambda/($Lambda-1) * ($b + ($a * $Lambda - 1) * $Xn/$X) )^(1/($a*$Lambda-1));
+				require($inflection_P > 0, "negative inflection_P="||$inflection_P);
+				$inflected = $final_P > $inflection_P;
+				// along Y until the inflection point
+				$final_P1 = $inflected ? $inflection_P : $final_P;
+				$final1 = $get_final_xy_along_y($X, $Y, $P, $final_P1, $pool_props, $inverted);
+				$final_X1 = $final1.X;
+				$final_Y1 = $final1.Y;
+				$final_Yn1 = $final_Y1 / $Lambda;
+				$delta_X1 = $final_X1 - $X;
+				$delta_Xn1 = -$b/($a*$Lambda-1) * $delta_X1;
+				$final_Xn1 = $Xn + $delta_Xn1;
+				require($final_Xn1 > 0, "negative final_Xn1="||$final_Xn1);
+				if ($inflected){
+					// then, along X
+					log('inflected at price', $inflection_P);
+					$final = $get_final_xy_along_x($final_X1, $final_Y1, $final_P1, $final_P, $pool_props, $inverted);
+					$final_X = $final.X;
+					$final_Y = $final.Y;
+					$final_Xn = $final_X/$Lambda;
+					$delta_Y2 = $final_Y - $final_Y1;
+					$delta_Yn2 = -$a/($b*$Lambda-1)*$delta_Y2;
+					$final_Yn = $final_Yn1 + $delta_Yn2;
+					require($final_Xn > 0, "negative final_Xn="||$final_Xn);
+					require($final_Xn <= $final_Xn1, "Xn didn't decrease");
+				}
+				else{
+					$final_X = $final_X1;
+					$final_Y = $final_Y1;
+					$final_Xn = $final_Xn1;
+					$final_Yn = $final_Yn1;
+				}
+			}
+			else
+				bounce("???");
+			
+			$balances.x = $y_in ? $final_X : $final_Y;
+			$balances.y = $y_in ? $final_Y : $final_X;
+			$balances.xn = $y_in ? $final_Xn : $final_Yn;
+			$balances.yn = $y_in ? $final_Yn : $final_Xn;
+		//	log("balances after swap", $balances);
+
+			// if inverted, XL corresponds to y, YL to x
+			$totals = $update_leveraged_balances($l_balances, $P, $final_P, $inverted);
+
+			$amount_X_exact = -($final_Xn - $Xn + $totals.delta_XL);
+			$amount_Y_exact = $final_Yn - $Yn + $totals.delta_YL;
+			$amount_Y = ceil($amount_Y_exact);
+			if ($received_amount_Y >= 0)
+				require($received_amount_Y >= $amount_Y, "expected " || $amount_Y || ", received " || $received_amount_Y);
+			require($amount_X_exact >= 0, "to pay " || $amount_X_exact);
+			$change = $received_amount_Y - $amount_Y;
+
+			$denom = 1 - $totals.XL_denom/$b/($final_X+$X0) - $totals.YL_denom/$a/($final_Y+$Y0);
+		//	log('denom after swap to price:', $denom);
+			require($denom >= $singularity_threshold, "too close to the singularity point, denom="||$denom||", need more liquidity in order to swap this amount");
+
+			// arb tax based on price difference
+			if ($recent.last_trade AND $recent.last_trade.address == $trigger_initial_address AND $recent.last_ts >= timestamp - $trade_merge_period){
+				$min_P = min($P, $y_in ? $recent.last_trade.pmin : 1/$recent.last_trade.pmax);
+				$max_P = max($final_P, $y_in ? $recent.last_trade.pmax : 1/$recent.last_trade.pmin);
+				$recent_traded_amount = $recent.last_trade.amounts[$out_token];
+				$recent_paid_tax = $recent.last_trade.paid_taxes[$out_token];
+			}
+			else{
+				$min_P = $P;
+				$max_P = $final_P;
+			}
+			$arb_profit_in_Y = ($max_P - $min_P) * ($recent_traded_amount + $amount_X_exact) / 2; // in Y
+			$arb_profit_in_X = $arb_profit_in_Y / $min_P;
+			$arb_profit_tax = $arb_profit_in_X * $pool_props.arb_profit_tax - $recent_paid_tax;
+			require($arb_profit_tax >= 0, "negative arb profit tax");
+
+			$swap_fee = $amount_X_exact * $pool_props.swap_fee;
+			$fee = $arb_profit_tax + $swap_fee;
+			
+			$net_amount_X_exact = $amount_X_exact - $fee;
+			$net_amount_X = floor($net_amount_X_exact);
+			$rounding_fee_X = $net_amount_X_exact - $net_amount_X;
+			$rounding_fee_Y = $amount_Y - $amount_Y_exact;
+			$total_fee = $fee + $rounding_fee_X;
+			
+			if ($min_amount_out)
+				require($net_amount_X >= $min_amount_out, "output amount " || $net_amount_X || " would be less than the expected minimum " || $min_amount_out);
+			
+			// include rounding fees
+			$fees = {
+				X: $total_fee,
+				Y: $rounding_fee_Y,
+			};
+
+			// add the fee to the pool without trading and affecting the price (Lambda>1) or to a separate profit accumulator (Lambda=1)
+			$add_net_balance_without_changing_price($balances, $profits, $out_token, $fees.X, $Lambda);
+			$add_net_balance_without_changing_price($balances, $profits, $in_token, $fees.Y, $Lambda);
+		//	log("balances after adding the fees", $balances);
+
+			$update_recent_data($recent, $inverted ? 1/$P : $P, $inverted ? 1/$final_P : $final_P, $trigger_initial_address, $out_token, $amount_X_exact, $arb_profit_tax, $pool_props.period_length);
+
+			$event = json_stringify({
+				type: 'swap',
+				direction: $y_in ? 'y2x' : 'x2y',
+				in: $amount_Y,
+				out: $net_amount_X,
+				swap_fee: $swap_fee,
+				arb_profit_tax: $arb_profit_tax,
+				total_fee: $total_fee,
+			});
+
+			{
+				net_amount_X: $net_amount_X,
+				amount_Y: $amount_Y,
+				swap_fee: $swap_fee,
+				arb_profit_tax: $arb_profit_tax,
+				total_fee: $total_fee,
+				fees: $fees,
+				change: $change,
+				initial_price: $P,
+				final_price: $final_P,
+				event: $event,
+			}
+		};
+
+
+
+
+	}`,
+	messages: [{
+		app: 'state',
+		state: `{
+			$A = $swap();
+			bounce("library only");
+		}`
+	}]
+}

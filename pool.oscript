@@ -1,0 +1,834 @@
+{
+	doc_url: "https://oswap.io/pool-v2.json",
+	getters: `{
+
+		$pool_lib_aa = 'MC5KTC25FGEMSGDBD6KBYW3DUFF35OKT';
+		$pool_lib_by_price_aa = 'U75U5R3BYXVXBOTSRRDKS7HUIB63DJ2K';
+
+		$get_param = ($name, $default) => {
+			$value = var[$name];
+			exists($value) ? $value : (exists(params[$name]) ? params[$name] : $default)
+		};
+
+		$get_swap_fee = () => $get_param('swap_fee', 0.003); // 0.3%
+		$get_exit_fee = () => $get_param('exit_fee', 0.005); // 0.5%
+		$get_arb_profit_tax = () => $get_param('arb_profit_tax', 0);
+		$get_leverage_profit_tax = () => $get_param('leverage_profit_tax', 0);
+		$get_leverage_token_tax = () => $get_param('leverage_token_tax', 0);
+
+		$get_mid_price = () => $get_param('mid_price', 0);
+		$get_price_deviation = () => $get_param('price_deviation', 0); // gamma
+		
+		$get_base_interest_rate = () => $get_param('base_interest_rate', 0.2); // 20%
+		$get_pool_leverage = () => $get_param('pool_leverage', 1); // Lambda
+		$get_alpha = () => $get_param('alpha', 0.5); // weight of x token
+		$get_period_length = () => $get_param('period_length', 3600); // min and max prices are tracked during the period to prevent manipulation
+
+	//	$get_linear_shares = ($issued_shares) => $issued_shares;
+	//	$get_issued_shares = ($linear_shares) => $linear_shares;
+
+		// linear bonding curve is the default
+		$get_bonding_curve = () => params.shares_bonding_curve OTHERWISE 'IXBHF6T4IKMYAFGRM54F5FVMXGKCTFNT';
+
+		$get_linear_shares = ($issued_shares) => $get_bonding_curve()#2.$get_linear_shares($issued_shares);
+		$get_issued_shares = ($linear_shares) => $get_bonding_curve()#2.$get_issued_shares($linear_shares);
+
+
+		$get_shifts_and_bounds = () => {
+			$mid_price = $get_mid_price(); // price of x_asset in terms of y_asset
+			if ($mid_price){
+				$alpha = $get_alpha();
+				$beta = 1 - $alpha;
+				$gamma = $get_price_deviation();
+				$lp_shares = var['lp_shares'];
+				$s = $lp_shares.linear;
+				$s_curve = $s * $lp_shares.coef;
+				$x0 = $s_curve / $mid_price^$beta / $gamma;
+				$y0 = $x0 * $mid_price;
+				$p_max = $alpha/$beta * $gamma^(1/$beta) * $mid_price;
+				$p_min = $alpha/$beta / $gamma^(1/$alpha) * $mid_price;
+			}
+			else{
+				$x0 = 0;
+				$y0 = 0;
+			}
+			{x0: $x0, y0: $y0, p_max: $p_max, p_min: $p_min}
+		};
+
+		$get_utilization_ratio = () => {
+			$alpha = $get_alpha();
+			$shifts = $get_shifts_and_bounds();
+			$balances = var['balances'] OTHERWISE {xn:0, yn:0, x:0, y:0};
+			$l_balances = var['leveraged_balances'] OTHERWISE {};
+			$pool_lib_aa.$get_utilization_ratio($balances, $l_balances, $shifts.x0, $shifts.y0, $alpha)
+		};
+
+		$get_interest_rate = () => {
+			$get_base_interest_rate() / (1 - $get_utilization_ratio())
+		};
+
+		$get_balances_after_interest = () => {
+			$alpha = $get_alpha();
+			$Lambda = $get_pool_leverage();
+			$shifts = $get_shifts_and_bounds();
+			$balances = var['balances'] OTHERWISE {xn:0, yn:0, x:0, y:0};
+			$l_balances = var['leveraged_balances'] OTHERWISE {};
+			$profits = var['profits'] OTHERWISE {x:0, y:0};
+			$recent = var['recent'] OTHERWISE {};
+			$i = $get_interest_rate();
+
+			$pool_lib = $pool_lib_aa || '';
+			$pool_lib#1.$charge_interest($balances, $l_balances, $profits, $shifts.x0, $shifts.y0, $recent.last_ts, $i, $alpha, $Lambda);
+			{
+				balances: $balances,
+				leveraged_balances: $l_balances,
+				profits: $profits,
+			}
+		};
+
+		$get_price = ($asset, $base_decimals, $quote_decimals, $bAfterInterest) => {
+			if ($asset == 'x' OR $asset == params.x_asset)
+				$asset_label = 'x';
+			else if ($asset == 'y' OR $asset == params.y_asset)
+				$asset_label = 'y';
+			else
+				bounce("unknown asset "||$asset);
+			$mul = 10^(-$quote_decimals + $base_decimals);
+			$alpha = $get_alpha();
+			$beta = 1 - $alpha;
+			$balances = var['balances'] OTHERWISE {xn:0, yn:0, x:0, y:0};
+			$shifts = $get_shifts_and_bounds();
+			
+			if ($bAfterInterest){
+				$l_balances = var['leveraged_balances'] OTHERWISE {};
+				$recent = var['recent'] OTHERWISE {};
+				$i = $get_interest_rate();
+				$Lambda = $get_pool_leverage();
+				$pool_lib = $pool_lib_aa || '';
+				$pool_lib#1.$charge_interest($balances, $l_balances, {}, $shifts.x0, $shifts.y0, $recent.last_ts, $i, $alpha, $Lambda);
+			}
+			($asset_label == 'x')
+				? $alpha/$beta * ($balances.y + $shifts.y0) / ($balances.x + $shifts.x0) * $mul
+				: $beta/$alpha * ($balances.x + $shifts.x0) / ($balances.y + $shifts.y0) * $mul
+		};
+
+		$get_swap_amounts_by_final_price = ($in_asset, $target_price_of_output_asset, $in_decimals, $out_decimals, $address) => {
+			if ($in_asset == 'x' OR $in_asset == params.x_asset)
+				$y_in = false;
+			else if ($in_asset == 'y' OR $in_asset == params.y_asset)
+				$y_in = true;
+			else
+				bounce("unknown in_asset "||$in_asset);
+			
+			// value_in_pennies = mul * value_in_display_units 
+			$in_mul = 10^(+$in_decimals);
+			$out_mul = 10^(+$out_decimals);
+			$price_mul = $in_mul/$out_mul;
+			$final_price = $target_price_of_output_asset * $price_mul; // in pennies
+
+			$alpha = $get_alpha();
+			$beta = 1 - $alpha;
+			$pool_props = {
+				alpha: $alpha,
+				beta: $beta,
+				Lambda: $get_pool_leverage(),
+				swap_fee: $get_swap_fee(),
+				arb_profit_tax: $get_arb_profit_tax(),
+				period_length: $get_period_length(),
+			};
+			$shifts = $get_shifts_and_bounds();
+			$balances = var['balances'] OTHERWISE {xn:0, yn:0, x:0, y:0};
+			$l_balances = var['leveraged_balances'] OTHERWISE {};
+			$profits = var['profits'] OTHERWISE {x:0, y:0};
+			$recent = var['recent'] OTHERWISE {};
+			$i = $get_interest_rate();
+
+			$pool_lib = $pool_lib_aa || '';
+			$pool_lib#1.$charge_interest($balances, $l_balances, $profits, $shifts.x0, $shifts.y0, $recent.last_ts, $i, $alpha, $pool_props.Lambda);
+
+			$pool_lib_by_price = $pool_lib_by_price_aa || '';
+			$res = $pool_lib_by_price#6.$swap($balances, $l_balances, $profits, $recent, $shifts.x0, $shifts.y0, $y_in, 0, $final_price, -1, 0, $address OTHERWISE 'ADDRESS', $pool_props);
+			{
+				in: $res.amount_Y/$in_mul,
+				out: $res.net_amount_X/$out_mul,
+				arb_profit_tax: $res.arb_profit_tax/$out_mul, // arb tax
+				swap_fee: $res.swap_fee/$out_mul, // trading fee
+				fees: {
+					in: $res.fees.Y/$in_mul, // rounding fee
+					out: $res.fees.X/$out_mul, // trading fee + arb tax + rounding fee
+				},
+				balances: $balances,
+				leveraged_balances: $l_balances,
+				recent: $recent,
+				initial_price: $res.initial_price/$price_mul,
+			}
+		};
+
+		$get_swap_amounts_by_delta_net_balance = ($in_asset, $in_asset_delta_net_balance, $in_decimals, $out_decimals, $address) => {
+			if ($in_asset == 'x' OR $in_asset == params.x_asset)
+				$y_in = false;
+			else if ($in_asset == 'y' OR $in_asset == params.y_asset)
+				$y_in = true;
+			else
+				bounce("unknown in_asset "||$in_asset);
+			
+			// value_in_pennies = mul * value_in_display_units 
+			$in_mul = 10^(+$in_decimals);
+			$out_mul = 10^(+$out_decimals);
+			$price_mul = $in_mul/$out_mul;
+			$delta_Yn = $in_asset_delta_net_balance * $in_mul; // in pennies
+
+			$alpha = $get_alpha();
+			$beta = 1 - $alpha;
+			$pool_props = {
+				alpha: $alpha,
+				beta: $beta,
+				Lambda: $get_pool_leverage(),
+				swap_fee: $get_swap_fee(),
+				arb_profit_tax: $get_arb_profit_tax(),
+				period_length: $get_period_length(),
+			};
+			$shifts = $get_shifts_and_bounds();
+			$balances = var['balances'] OTHERWISE {xn:0, yn:0, x:0, y:0};
+			$l_balances = var['leveraged_balances'] OTHERWISE {};
+			$profits = var['profits'] OTHERWISE {x:0, y:0};
+			$recent = var['recent'] OTHERWISE {};
+			$i = $get_interest_rate();
+
+			$pool_lib = $pool_lib_aa || '';
+			$pool_lib#1.$charge_interest($balances, $l_balances, $profits, $shifts.x0, $shifts.y0, $recent.last_ts, $i, $alpha, $pool_props.Lambda);
+
+			$res = $pool_lib#6.$swap($balances, $l_balances, $profits, $recent, $shifts.x0, $shifts.y0, $y_in, $delta_Yn, 0, -1, 0, $address OTHERWISE 'ADDRESS', $pool_props);
+			{
+				in: $res.amount_Y/$in_mul,
+				out: $res.net_amount_X/$out_mul,
+				arb_profit_tax: $res.arb_profit_tax/$out_mul, // arb tax
+				swap_fee: $res.swap_fee/$out_mul, // trading fee
+				fees: {
+					in: $res.fees.Y/$in_mul, // rounding fee
+					out: $res.fees.X/$out_mul, // trading fee + arb tax + rounding fee
+				},
+				balances: $balances,
+				leveraged_balances: $l_balances,
+				recent: $recent,
+				initial_price: $res.initial_price/$price_mul,
+				final_price: $res.final_price/$price_mul,
+			}
+		};
+
+		$get_leveraged_price = ($asset, $L, $bAfterInterest) => {
+			if ($asset == 'x' OR $asset == params.x_asset)
+				$signedL = $L;
+			else if ($asset == 'y' OR $asset == params.y_asset)
+				$signedL = -$L;
+			else
+				bounce("unknown asset "||$asset);
+			
+			$l_balances = var['leveraged_balances'] OTHERWISE {};
+			if ($bAfterInterest){
+				$balances = var['balances'] OTHERWISE {xn:0, yn:0, x:0, y:0};
+				$recent = var['recent'] OTHERWISE {};
+				$i = $get_interest_rate();
+				$alpha = $get_alpha();
+				$Lambda = $get_pool_leverage();
+				$shifts = $get_shifts_and_bounds();
+				$pool_lib = $pool_lib_aa || '';
+				$pool_lib#1.$charge_interest($balances, $l_balances, {}, $shifts.x0, $shifts.y0, $recent.last_ts, $i, $alpha, $Lambda);
+			}
+			$l_info = $l_balances[$signedL||'x'];
+			$l_info.balance / $L / $l_info.supply
+		};
+
+		$get_leveraged_trade_amounts = ($asset, $L, $delta_Xn, $entry_price, $address) => {
+			$asset_id = $asset == 'x' ? params.x_asset : ($asset == 'y' ? params.y_asset : $asset);
+			$alpha = $get_alpha();
+			$beta = 1 - $alpha;
+			$pool_props = {
+				alpha: $alpha,
+				beta: $beta,
+				Lambda: $get_pool_leverage(),
+				swap_fee: $get_swap_fee(),
+				arb_profit_tax: $get_arb_profit_tax(),
+				leverage_profit_tax: $get_leverage_profit_tax(),
+				leverage_token_tax: $get_leverage_token_tax(),
+				period_length: $get_period_length(),
+				x_asset: params.x_asset,
+				y_asset: params.y_asset,
+			};
+			$shifts = $get_shifts_and_bounds();
+			$balances = var['balances'] OTHERWISE {xn:0, yn:0, x:0, y:0};
+			$l_balances = var['leveraged_balances'] OTHERWISE {};
+			$profits = var['profits'] OTHERWISE {x:0, y:0};
+			$recent = var['recent'] OTHERWISE {};
+			$i = $get_interest_rate();
+
+			$pool_lib = $pool_lib_aa || '';
+			$pool_lib#1.$charge_interest($balances, $l_balances, $profits, $shifts.x0, $shifts.y0, $recent.last_ts, $i, $alpha, $pool_props.Lambda);
+			$res = $pool_lib#21.$trade_l_shares($balances, $l_balances, $profits, $recent, $shifts.x0, $shifts.y0, $L, $asset_id, $delta_Xn, $entry_price, $address OTHERWISE 'ADDRESS', $pool_props);
+
+			$res.balances = $balances;
+			$res.leveraged_balances = $l_balances;
+			$res.recent = $recent;
+			$res
+		};
+
+		$get_total_balances = ($bAfterInterest) => {
+			$balances = var['balances'] OTHERWISE {xn:0, yn:0, x:0, y:0};
+			$l_balances = var['leveraged_balances'] OTHERWISE {};
+			$profits = var['profits'] OTHERWISE {x:0, y:0};
+			$recent = var['recent'] OTHERWISE {};
+			if ($bAfterInterest){
+				$i = $get_interest_rate();
+				$alpha = $get_alpha();
+				$Lambda = $get_pool_leverage();
+				$shifts = $get_shifts_and_bounds();
+				$pool_lib = $pool_lib_aa || '';
+				$pool_lib#1.$charge_interest($balances, $l_balances, $profits, $shifts.x0, $shifts.y0, $recent.last_ts, $i, $alpha, $Lambda);
+			}
+			$leverages = $pool_lib_aa.$get_leverages();
+			$p = this_address#30.$get_price('x', 0, 0, true);
+			$l_info = reduce($leverages, 6, ($info, $L) => {
+				$x_balance = $l_balances[$L||'x'].balance;
+				$y_balance = $l_balances[-$L||'x'].balance;
+				if ($x_balance){
+					$info.x_assets = $info.x_assets + $x_balance;
+					$info.y_debt = $info.y_debt + $x_balance * ($L-1)/$L * $p;
+				}
+				if ($y_balance){
+					$info.y_assets = $info.y_assets + $y_balance;
+					$info.x_debt = $info.x_debt + $y_balance * ($L-1)/$L / $p;
+				}
+				$info
+			}, {x_assets:0, y_assets:0, x_debt:0, y_debt:0});
+			$totals = {
+				x: {
+					pool: $balances.xn,
+					profits: $profits.x,
+					leverage: {
+						assets: $l_info.x_assets,
+						debt: $l_info.x_debt,
+						net: $l_info.x_assets - $l_info.x_debt,
+					},
+					balance: balance[params.x_asset],
+				},
+				y: {
+					pool: $balances.yn,
+					profits: $profits.y,
+					leverage: {
+						assets: $l_info.y_assets,
+						debt: $l_info.y_debt,
+						net: $l_info.y_assets - $l_info.y_debt,
+					},
+					balance: balance[params.y_asset],
+				},
+			};
+			$totals.x.total = $totals.x.pool + $totals.x.profits + $totals.x.leverage.net;
+			$totals.y.total = $totals.y.pool + $totals.y.profits + $totals.y.leverage.net;
+			$totals.x.excess = $totals.x.balance - $totals.x.total;
+			$totals.y.excess = $totals.y.balance - $totals.y.total;
+			$totals
+		};
+	}`,
+	init: "{
+
+		$pool_lib = $pool_lib_aa || '';
+		$pool_lib_by_price = $pool_lib_by_price_aa || '';
+
+		$x_asset = params.x_asset;
+		$y_asset = params.y_asset;
+	//	require($x_asset AND $y_asset, "bad assets");
+		require($x_asset != $y_asset, "identical assets");
+
+		$alpha = $get_alpha();
+		require($alpha > 0 AND $alpha < 1, "invalid x_asset weight");
+		$beta = 1 - $alpha;
+
+		$Lambda = $get_pool_leverage();
+		require($Lambda >= 1, "invalid pool leverage");
+		require($alpha != 1/$Lambda, "pool leverage = 1/alpha");
+		require($beta != 1/$Lambda, "pool leverage = 1/beta");
+
+		$mid_price = $get_mid_price(); // price of x_asset in terms of y_asset
+		$gamma = $get_price_deviation();
+		require(!$mid_price == !$gamma, "mid price and price deviation should be set or unset at the same time");
+
+		if ($Lambda > 1)
+			require(!$mid_price, "price range setting is incompatible with pool leverage");
+
+
+		$lp_shares = var['lp_shares'];// OTHERWISE {issued: 0, linear: 0, coef: 1};
+		$s = $lp_shares.linear;
+		$s_curve = $s * $lp_shares.coef;
+
+		$shares_asset = $lp_shares.asset;
+
+		$received_amount_x = trigger.output[[asset=$x_asset]];
+		$received_amount_y = trigger.output[[asset=$y_asset]];
+		$received_shares_amount = $shares_asset ? trigger.output[[asset=$shares_asset]] : 0;
+
+
+
+		$min_x_amount = ($x_asset == 'base') ? 10000 : 0; // bounce fee
+		$min_y_amount = ($y_asset == 'base') ? 10000 : 0; // bounce fee
+
+		$net_received_amount_x = $received_amount_x > $min_x_amount ? $received_amount_x - $min_x_amount : 0;
+		$net_received_amount_y = $received_amount_y > $min_y_amount ? $received_amount_y - $min_y_amount : 0;
+
+
+		if ($mid_price){
+		//	$avg_price = $alpha/$beta * $mid_price; // pmin^alpha * pmax^beta
+			$mid_price_beta = $mid_price^$beta;
+			$x0 = $s_curve / $mid_price_beta / $gamma;
+			$y0 = $x0 * $mid_price;
+		}
+		else{
+			$x0 = 0;
+			$y0 = 0;
+		}
+
+		$pool_props = {
+			alpha: $alpha,
+			beta: $beta,
+			gamma: $gamma,
+			mid_price: $mid_price,
+			mid_price_beta: $mid_price_beta,
+			Lambda: $Lambda,
+			swap_fee: $get_swap_fee(),
+			exit_fee: $get_exit_fee(),
+			arb_profit_tax: $get_arb_profit_tax(),
+			leverage_profit_tax: $get_leverage_profit_tax(),
+			leverage_token_tax: $get_leverage_token_tax(),
+			period_length: $get_period_length(),
+			x_asset: $x_asset,
+			y_asset: $y_asset,
+		};
+
+
+		$balances = var['balances'] OTHERWISE {xn:0, yn:0, x:0, y:0};
+		$profits = var['profits'] OTHERWISE {x:0, y:0};
+		$l_balances = var['leveraged_balances'] OTHERWISE {};
+		$recent = var['recent'] OTHERWISE {};
+
+		$governance_aa = var['governance_aa'];
+		$from_governance = $governance_aa AND trigger.address == $governance_aa AND trigger.data.name;
+
+		$get_current_interest_rate = ($base_interest_rate) => {
+			$base_interest_rate / (1 - $pool_lib#1.$get_utilization_ratio($balances, $l_balances, $x0, $y0, $alpha))
+		};
+
+		if (length($l_balances) AND !$from_governance){
+			// charge interest accrued since the previous interaction
+			$i = $get_current_interest_rate($get_base_interest_rate());
+			$charged_interest = $pool_lib#1.$charge_interest($balances, $l_balances, $profits, $x0, $y0, $recent.last_ts, $i, $alpha, $Lambda);
+			response['interest'] = json_stringify($charged_interest);
+
+			// in some dendrites, we don't write balances and l_balances and don't update last_ts. Then, the charge is not applied and will be recalculated in the next call
+		}
+
+		$governance_base_aa = 'WBGLXP6WYRTHXYGBOBSBIHXM6TTGUUL7';
+	}",
+	messages: {
+		cases: [
+
+			// define the governance AA and shares asset
+			{
+				if: `{ !$shares_asset AND trigger.data.define }`,
+				messages: [
+					{ // define governance AA
+						app: 'definition',
+						payload: {
+							definition: [
+								'autonomous agent',
+								{
+									base_aa: `{$governance_base_aa}`,
+									params: {
+										pool_aa: `{this_address}`,
+										challenging_period: `{params.governance_challenging_period OTHERWISE ''}`,
+										freeze_period: `{params.governance_freeze_period OTHERWISE ''}`,
+									}
+								}
+							]
+						}
+					},
+					{
+						app: 'asset',
+						payload: {
+							// without cap
+							is_private: false,
+							is_transferrable: true,
+							auto_destroy: false,
+							fixed_denominations: false,
+							issued_by_definer_only: true,
+							cosigned_by_definer: false,
+							spender_attested: false,
+						}
+					},
+					{ // call back to the factory to let it know our shares asset
+						if: `{trigger.data.factory}`,
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{address: '{trigger.data.factory}', amount: 1000},
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['governance_aa'] = unit[response_unit].messages[[.app='definition']].payload.address;
+							var['lp_shares'] = {issued: 0, linear: 0, coef: 1, asset: response_unit};
+							response['shares_asset'] = response_unit;
+						}`
+					}
+				]
+			},
+
+			{ // accept variable changes from the governance AA
+				if: `{ $from_governance }`, // trigger.data.value can be falsy
+				init: `{
+					$name = trigger.data.name;
+					$value = trigger.data.value;
+					$pool_lib#2.$validate_and_apply_new_governed_param_value($name, $value, $balances, $l_balances, $profits, $lp_shares, $pool_props, params.locked_governance);
+				}`,
+				messages: [
+					{
+						app: 'state',
+						state: `{
+						//	if ($name == 'pool_leverage' OR $name == 'alpha' OR $name == 'mid_price' OR $name == 'price_deviation'){
+								var['balances'] = $balances;
+								var['profits'] = $profits; // to preserve the price, we sometimes move the excessive balances to profits
+						//	}
+							if ($name == 'mid_price' OR $name == 'price_deviation')
+								var['lp_shares'] = $lp_shares;
+							var[$name] = $value;
+						}`
+					}
+				]
+			},
+
+			// define leveraged asset
+			{
+				if: `{ trigger.data.define_leverage AND trigger.data.leverage }`,
+				init: `{
+					$leverage = trigger.data.leverage;
+					$allowed_leverages = {'2': true, '5': true, '10': true, '20': true, '50': true, '100': true};
+					require($allowed_leverages[abs($leverage)], "leverage must be one of 2, 5, 10, 20, 50, or 100");
+					require(!var['leveraged_asset' || $leverage], "asset for this leverage already defined");
+				}`,
+				messages: [
+					{
+						app: 'asset',
+						payload: {
+							// without cap
+							is_private: false,
+							is_transferrable: true,
+							auto_destroy: false,
+							fixed_denominations: false,
+							issued_by_definer_only: true,
+							cosigned_by_definer: false,
+							spender_attested: false,
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+						//	var['last_ts'] = timestamp; // not updating the balances either
+							var['leveraged_asset' || $leverage] = response_unit;
+							response['leveraged_asset' || $leverage] = response_unit;
+						}`
+					}
+				]
+			},
+
+
+			// swap
+			{
+				if: `{
+					$final_price = trigger.data.final_price;
+					$x_in = $received_amount_x > $min_x_amount AND (trigger.data.delta_xn OR $final_price);
+					$y_in = $received_amount_y > $min_y_amount AND (trigger.data.delta_yn OR $final_price);
+					($x_in OR $y_in) AND $received_shares_amount == 0 AND !trigger.data.buy_shares
+				}`,
+				init: `{
+					require(!($x_in AND $y_in), "received both assets");
+
+					if ($y_in){
+						$received_amount_Y = $received_amount_y;
+						$in_asset = $y_asset;
+						$out_asset = $x_asset;
+						$delta_Yn = trigger.data.delta_yn;
+					}
+					else{ // x <-> y swap their roles. Uppercase X, Y, and P refer to invertable values
+						$received_amount_Y = $received_amount_x;
+						$in_asset = $x_asset;
+						$out_asset = $y_asset;
+						$delta_Yn = trigger.data.delta_xn;
+					}
+
+					$res = ($final_price ? $pool_lib_by_price : $pool_lib)#6.$swap($balances, $l_balances, $profits, $recent, $x0, $y0, $y_in, $final_price ? 0 : $delta_Yn, $final_price, $received_amount_Y, trigger.data.min_amount_out, trigger.initial_address, $pool_props);
+
+					// further hops
+					$hops = trigger.data.hops;
+					$address = $hops[0].address OTHERWISE trigger.address;
+					$change_address = $hops[0].change_address OTHERWISE $address;
+					if ($hops){
+						$data_for_next_hop = $hops[0].data;
+						delete($hops, 0); // remove the head hop
+						if ($data_for_next_hop OR length($hops)){
+							$forwarded_data = $data_for_next_hop OTHERWISE {};
+							if (length($hops))
+								$forwarded_data.hops = $hops;
+						}
+					}
+
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: '{$out_asset}',
+							outputs: [
+								{address: "{$address}", amount: "{$res.net_amount_X}"}
+							]
+						}
+					},
+					{
+						app: 'payment',
+						payload: {
+							asset: '{$in_asset}',
+							outputs: [
+								{address: "{$change_address}", amount: "{$res.change}"}
+							]
+						}
+					},
+					{
+						if: `{$forwarded_data}`,
+						app: 'data',
+						payload: `{$forwarded_data}`
+					},
+					{
+						app: 'state',
+						state: `{
+							if ($Lambda == 1)
+								var['profits'] = $profits;
+							var['balances'] = $balances;
+							var['leveraged_balances'] = $l_balances;
+							var['recent'] = $recent;
+							response['event'] = $res.event; // for stats
+						}`
+					}
+				]
+			},
+
+			// buy/sell leveraged tokens
+			{
+				if: `{ trigger.data.L AND trigger.data.asset AND (trigger.data.buy OR trigger.data.sell) AND trigger.data.delta }`,
+				init: `{
+					require(!params.no_leverage, "leverage not allowed");
+
+					$res = $pool_lib#23.$handle_trade_l_shares_request(this_address, $balances, $l_balances, $profits, $recent, $x0, $y0, trigger.data, trigger.address, trigger.outputs, trigger.initial_address, $pool_props);
+
+					$asset_out = $res.asset_out;
+					$shares = $res.shares;
+					$shares_change = $res.shares_change;
+					$asset = $res.asset;
+					$l_shares_asset = $res.l_shares_asset;
+					$position = $res.position;
+
+				}`,
+				messages: [
+					{
+						if: '{trigger.data.buy AND trigger.data.tokens}',
+						app: 'payment',
+						payload: {
+							asset: '{$l_shares_asset}',
+							outputs: [
+								{address: "{trigger.address}", amount: "{$shares}"}
+							]
+						}
+					},
+					{
+						if: '{trigger.data.sell AND !$position}',
+						app: 'payment',
+						payload: {
+							asset: '{$l_shares_asset}',
+							outputs: [
+								{address: "{trigger.address}", amount: "{$shares_change}"}
+							]
+						}
+					},
+					{
+						app: 'payment',
+						payload: {
+							asset: '{$asset}',
+							outputs: [
+								{address: "{trigger.address}", amount: "{$asset_out}"}
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['recent'] = $recent;
+							var['balances'] = $balances;
+							var['leveraged_balances'] = $l_balances;
+							if (trigger.data.buy AND !trigger.data.tokens){
+								var['positions'] += 1;
+								$new_position = 'position_' || $res.signedL || '_' || var['positions'];
+								var[$new_position] = {
+									owner: trigger.address,
+									shares: $shares,
+									price: $res.avg_share_price, // average entry price
+									ts: timestamp,
+								};
+								response['position'] = $new_position;
+							}
+							response['event'] = $res.event;
+							// if we got change after closing a position, update the position with the remaining shares amount
+							if ($position){
+								if ($shares_change){
+									$position.shares = $shares_change;
+									response['remaining_shares'] = $shares_change;
+								}
+								var[trigger.data.position] = $shares_change ? $position : false;
+							}
+							if ($Lambda == 1)
+								var['profits'] = $profits;
+						}`
+					}
+
+				]
+			},
+
+			// transfer a leveraged position to a new owner
+			{
+				if: `{ trigger.data.transfer AND trigger.data.position AND trigger.data.new_owner }`,
+				init: `{
+					require(is_valid_address(trigger.data.new_owner), "new owner address is invalid");
+					$position = var[trigger.data.position];
+					require($position, "no such position");
+					require($position.owner == trigger.address, "you are not the owner of this position");
+				}`,
+				messages: [{
+					app: 'state',
+					state: `{
+						$position.owner = trigger.data.new_owner;
+						var[trigger.data.position] = $position;
+						response['message'] = "Transferred";
+					}`
+				}]
+			},
+
+
+			// buy shares from the AA
+			{
+				if: `{
+					$buy_shares = ($net_received_amount_x > 0 OR $net_received_amount_y > 0)/* AND trigger.data.buy_shares*/;
+					$received_shares_amount == 0 AND ($buy_shares OR trigger.data.add_profits)
+				}`,
+				init: `{
+					$res = $pool_lib#1.$buy_shares($s, $balances, $profits, $recent, $x0, $y0, $net_received_amount_x, $net_received_amount_y, $pool_props);
+
+					$lp_shares.coef = $lp_shares.coef * $res.coef;
+					$lp_shares.linear = $s + $res.shares_amount;
+					$new_issued = $get_issued_shares($lp_shares.linear);
+					$issue_amount = $new_issued - $lp_shares.issued;
+					$lp_shares.issued = $new_issued;
+				}`,
+				messages: [
+					{
+						if: '{$buy_shares}',
+						app: 'payment',
+						payload: {
+							asset: '{$shares_asset}',
+							outputs: [
+								{address: "{trigger.address}", amount: "{$issue_amount}"}
+							]
+						}
+					},
+					{
+						if: '{$buy_shares}',
+						app: 'payment',
+						payload: {
+							asset: '{$x_asset}',
+							outputs: [
+								{address: "{trigger.address}", amount: "{$res.change_x}"}
+							]
+						}
+					},
+					{
+						if: '{$buy_shares}',
+						app: 'payment',
+						payload: {
+							asset: '{$y_asset}',
+							outputs: [
+								{address: "{trigger.address}", amount: "{$res.change_y}"}
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['lp_shares'] = $lp_shares;
+							var['balances'] = $balances;
+							var['leveraged_balances'] = $l_balances;
+							var['profits'] = $profits;
+							var['recent'] = $recent;
+							response['event'] = $res.event;
+						}`
+					}
+				]
+			},
+
+			// redeem shares
+			// preferred_asset (if any) is paid first if it is excessive, then both assets are paid out in proportion. The price between assets doesn't change
+			{
+				if: `{ $received_shares_amount > 0 AND $received_amount_x <= $min_x_amount AND $received_amount_y <= $min_y_amount }`,
+				init: `{
+					$new_issued = $lp_shares.issued - $received_shares_amount;
+					$new_linear = $get_linear_shares($new_issued);
+
+					$res = $pool_lib#1.$redeem_shares($s, $balances, $l_balances, $profits, $recent, $x0, $y0, $s - $new_linear, trigger.data.preferred_asset, $pool_props);
+
+					$lp_shares.coef = $lp_shares.coef * $res.coef;
+					$lp_shares.linear = $new_linear;
+					$lp_shares.issued = $new_issued;
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: '{$x_asset}',
+							outputs: [
+								{address: "{trigger.address}", amount: "{$res.xn_amount}"}
+							]
+						}
+					},
+					{
+						app: 'payment',
+						payload: {
+							asset: '{$y_asset}',
+							outputs: [
+								{address: "{trigger.address}", amount: "{$res.yn_amount}"}
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['lp_shares'] = $lp_shares;
+							var['balances'] = $balances;
+							var['leveraged_balances'] = $l_balances;
+							var['profits'] = $profits;
+							var['recent'] = $recent;
+							response['event'] = $res.event;
+						}`
+					}
+				]
+			},
+
+
+		]
+	}
+}

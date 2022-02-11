@@ -1,0 +1,15 @@
+{
+	getters: `{
+
+		$get_linear_shares = ($issued_shares) => $issued_shares;
+	
+		$get_issued_shares = ($linear_shares) => $linear_shares;
+
+	}`,
+	messages: [{
+		app: 'state',
+		state: `{
+			bounce("library only");
+		}`
+	}]
+}

@@ -1,0 +1,195 @@
+{
+	doc_url: "https://oswap.io/pool-v2-governance.json",
+	getters: `{
+
+		$get_parsed_value = ($name, $value) => {
+			$value
+		};
+
+	}`,
+	init: `{
+
+		$challenging_period = params.challenging_period OTHERWISE 3*24*3600; // 3 days
+
+		// one cannot withdraw for this period after voting for a winning value
+		$freeze_period = params.freeze_period OTHERWISE 30*24*3600; // 30 days
+
+		$pool_aa = params.pool_aa;
+		require($pool_aa, "no pool_aa");
+
+		$lp_shares = var[$pool_aa]['lp_shares'];
+		$asset = $lp_shares.asset;
+
+		$locked_governance = definition[$pool_aa][1].params.locked_governance;
+		
+		$names = [
+			'swap_fee',
+			'exit_fee',
+			'arb_profit_tax',
+			'leverage_profit_tax',
+			'leverage_token_tax',
+			'mid_price',
+			'price_deviation',
+			'base_interest_rate',
+			'pool_leverage',
+			'alpha',
+			'period_length',
+		];
+		
+		$is_allowed_name = $name => {
+			length(filter($names, 20, $n => $n == $name)) == 1
+		};
+
+		$get_value_key = $value => $value;
+
+	}`,
+	messages: {
+		cases: [
+
+			{ // commit new value after the challenging period expires
+				if: `{ trigger.data.name AND trigger.data.commit }`,
+				init: `{
+					$name = trigger.data.name;
+					$leader = var['leader_' || $name];
+					$current_value = var[$name];
+					require(exists($leader), "no leader"); // can be 0
+					if (exists($current_value) AND $leader == $current_value)
+						bounce("already equal to leader");
+					require(var['challenging_period_start_ts_' || $name] + $challenging_period < timestamp, "challenging period not expired yet");
+				}`,
+				messages: [
+					// ping the pool_aa to record the new value
+					{
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{address: "{$pool_aa}", amount: 5000}
+							]
+						}
+					},
+					{
+						app: 'data',
+						payload: {
+							name: `{$name}`,
+							value: `{$get_parsed_value($name, $leader)}`,
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var[$name] = $leader;
+						}`
+					}
+				]
+			},
+
+			{ // add support to a value
+				if: `{ trigger.data.name }`,
+				init: `{
+					$balance = var['balance_' || trigger.address] + trigger.output[[asset=$asset]];
+					require($balance, "you have no deposited balance and cannot vote");
+
+					$name = trigger.data.name;
+					$value = trigger.data.value; // can be empty to remove one's vote
+					require($is_allowed_name($name), "unknown name: " || $name);
+					require(!$locked_governance[$name], "this param is locked and can't be changed by governance");
+
+					if (exists($value)){
+						require(typeof($value) == 'number' AND $value >= 0, "invalid value");
+						if ($name == 'swap_fee' OR $name == 'exit_fee' OR $name == 'leverage_profit_tax' OR $name == 'leverage_token_tax') // however >100% tax allowed for arb_profit_tax
+							require($value < 1, "invalid value");
+						if ($name == 'price_deviation' OR $name == 'mid_price'){
+							if ($name == 'price_deviation'){
+								require($value > 1, "invalid value");
+								$active_value = $pool_aa#1.$get_price_deviation();
+								require($active_value > 0, "the parameter can't be changed");
+							}
+							if ($name == 'mid_price'){
+								require($value > 0, "invalid value");
+								$active_value = $pool_aa#1.$get_mid_price();
+								require($active_value > 0, "the parameter can't be changed");
+							}
+							$alpha = $pool_aa#1.$get_alpha();
+							require($alpha == 0.5, "equal weights only");
+						}
+						if ($name == 'pool_leverage'){
+							require($value >= 1, "invalid value");
+							$mid_price = $pool_aa#1.$get_mid_price();
+							require($mid_price == 0, "can't be changed while trading range is limited");
+							$alpha = $pool_aa#1.$get_alpha();
+							require($alpha != 1/$value AND 1-$alpha != 1/$value, "can't be equal to 1/alpha or 1/beta");
+						}
+						if ($name == 'alpha'){
+							require($value > 0 AND $value < 1, "invalid value");
+							$Lambda = $pool_aa#1.$get_pool_leverage();
+							require($value != 1/$Lambda AND 1-$value != 1/$Lambda, "pool leverage can't be equal to 1/alpha or 1/beta");
+						}
+						if ($name == 'period_length'){
+							require(is_integer($value), "invalid value");
+						}
+					}
+				}`,
+				messages: [
+					{
+						app: 'state',
+						state: `{
+							if (trigger.output[[asset=$asset]])
+								var['balance_' || trigger.address] += trigger.output[[asset=$asset]];
+							$prev_choice = var['choice_' || trigger.address || '_' || $name];
+							$leader = var['leader_' || $name];
+							if (exists($leader) AND exists($prev_choice) AND $prev_choice == $leader AND var['challenging_period_start_ts_' || $name] + $challenging_period + $freeze_period > timestamp)
+								bounce("you cannot change your vote yet");
+							var['choice_' || trigger.address || '_' || $name] = $value;
+							if (exists($prev_choice)){
+								$prev_choice_key = $get_value_key($prev_choice);
+								var['support_' || $name || '_' || $prev_choice_key] -= var['support_' || $name || '_' || $prev_choice_key || '_' || trigger.address];
+								var['support_' || $name || '_' || $prev_choice_key || '_' || trigger.address] = false;
+							}
+							if (exists($value)){
+								$value_key = $get_value_key($value);
+								var['support_' || $name || '_' || $value_key] += $balance;
+								var['support_' || $name || '_' || $value_key || '_' || trigger.address] = $balance;
+								if (!exists($leader) OR var['support_' || $name || '_' || $value_key] > var['support_' || $name || '_' || $get_value_key($leader)]){
+									var['leader_' || $name] = $value;
+									var['challenging_period_start_ts_' || $name] = timestamp;
+								}
+							}
+						}`
+					}
+				]
+			},
+
+			{ // withdraw balance - only after all votes are untied
+				if: `{ trigger.data.withdraw }`,
+				init: `{
+					$balance = var['balance_' || trigger.address] + trigger.output[[asset=$asset]];
+					require($balance, "you have no deposited balance and cannot withdraw");
+					$amount = trigger.data.amount OTHERWISE $balance;
+					require($amount <= $balance, "your balance is only " || $balance);
+					foreach($names, 10, $name => {
+						require(!var['choice_' || trigger.address || '_' || $name], "support for " || $name || " not removed yet");
+					});
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: `{$asset}`,
+							outputs: [
+								{address: "{trigger.address}", amount: "{ $amount }"}
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['balance_' || trigger.address] -= $amount;
+						}`
+					}
+				]
+			},
+
+		]
+	}
+}

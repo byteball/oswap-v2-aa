@@ -1,0 +1,155 @@
+{
+	doc_url: "https://oswap.io/pool-v2-factory.json",
+	init: `{
+		$pool_base_aa = '2JYYNOSRFGLI3TBI4FVSE6GFBUAZTTI3';
+	}`,
+	messages: {
+		cases: [
+
+			// accept a callback from a newly created pool AA to record its newly defined asset
+			{
+				if: `{
+					$params = var['pool_' || trigger.address];
+					$params AND !$params.pool_asset AND definition[trigger.address][1].base_aa == $pool_base_aa
+				}`,
+				messages: [
+					{
+						app: 'state',
+						state: `{
+							$params.pool_asset = trigger.unit;
+							var['pool_' || trigger.address] = $params;
+						}`
+					}
+				]
+			},
+
+			// create a new pool AA
+			{
+				init: `{
+					$x_asset = trigger.data.x_asset;
+					$y_asset = trigger.data.y_asset;
+					require($x_asset, "missing x_asset");
+					require($y_asset, "missing y_asset");
+					require($x_asset != $y_asset, "identical assets");
+					require(asset[$x_asset].exists, "the requested x_asset does not exist");
+					require(asset[$y_asset].exists, "the requested y_asset does not exist");
+					require(asset[$x_asset].is_transferrable AND !asset[$x_asset].is_private AND !asset[$x_asset].fixed_denominations, "x_asset must be transferrable, public, and divisible");
+					require(asset[$y_asset].is_transferrable AND !asset[$y_asset].is_private AND !asset[$y_asset].fixed_denominations, "y_asset must be transferrable, public, and divisible");
+					
+					$params = {
+						x_asset: $x_asset,
+						y_asset: $y_asset,
+					};
+
+					$names = [
+						'swap_fee',
+						'exit_fee',
+						'arb_profit_tax',
+						'leverage_profit_tax',
+						'leverage_token_tax',
+						'mid_price',
+						'price_deviation',
+						'base_interest_rate',
+						'pool_leverage',
+						'alpha',
+						'period_length',
+					];
+					foreach($names, 11, $name => {
+						$value = trigger.data[$name];
+						if (exists($value)) {
+							require(typeof($value) == 'number' AND $value >= 0, $name||" must be a nonnegative number");
+							if ($name == 'swap_fee' OR $name == 'exit_fee' OR $name == 'leverage_profit_tax' OR $name == 'leverage_token_tax') // however >100% tax allowed for arb_profit_tax
+								require($value < 1, $name||" must be < 1");
+							if ($name == 'price_deviation')
+								require($value > 1, $name||" must be > 1");
+							if ($name == 'pool_leverage')
+								require($value >= 1, $name||" must be >= 1");
+							if ($name == 'alpha')
+								require($value > 0 AND $value < 1, $name||" must be between 0 and 1 non-inclusive");
+							if ($name == 'period_length')
+								require(is_integer($value), $name||" must be integer");
+							$params[$name] = $value;
+						}
+					});
+
+					$alpha = $params.alpha OTHERWISE 0.5;
+					$Lambda = $params.pool_leverage OTHERWISE 1;
+					require($alpha != 1/$Lambda AND 1-$alpha != 1/$Lambda, "pool leverage = 1/alpha or 1/beta");
+
+					require(!$params.mid_price == !$params.price_deviation, "mid price and price deviation should be set or unset at the same time");
+
+					if ($Lambda > 1)
+						require(!$params.mid_price, "price range setting is incompatible with pool leverage");
+					
+					
+					// a dictionary of fields that are not allowed to be changed by governance
+					if (trigger.data.locked_governance){
+						require(is_assoc(trigger.data.locked_governance), "locked_governance must be an associative array");
+						$params.locked_governance = trigger.data.locked_governance;
+					}
+
+					// option to disable leverage
+					if (trigger.data.no_leverage)
+						$params.no_leverage = 1;
+
+					// bonding curve for issuing shares (linear by default)
+					if (trigger.data.shares_bonding_curve){
+						require(is_aa(trigger.data.shares_bonding_curve), "is not an AA");
+						$params.shares_bonding_curve = trigger.data.shares_bonding_curve;
+					}
+
+					// governance AA params
+					foreach(['governance_challenging_period', 'governance_freeze_period'], 2, $p => {
+						$value = trigger.data[$p];
+						if (exists($value)) {
+							require(is_integer($value) AND $value > 0, "bad " || $p);
+							$params[$p] = $value;
+						}
+					});
+
+					$pool_aa = [
+						'autonomous agent',
+						{
+							base_aa: $pool_base_aa,
+							params: $params
+						}
+					];
+					$pool_aa_address = chash160($pool_aa);
+					require(!definition[$pool_aa_address], "such a pool already exists: "||$pool_aa_address);
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{ address: "{ $pool_aa_address }", amount: 5000 },
+							]
+						}
+					},
+					{
+						app: 'data',
+						payload: {
+							define: 1,
+							factory: `{this_address}`
+						}
+					},
+					{
+						app: 'definition',
+						payload: {
+							definition: `{$pool_aa}`
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['pool_' || $pool_aa_address] = $params;
+							response['address'] = $pool_aa_address;
+						}`
+					}
+				]
+
+			}
+		]
+	}
+}
