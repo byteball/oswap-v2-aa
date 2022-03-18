@@ -29,6 +29,6 @@
   "resolutions": {
     "chalk": "^3.0.0",
     "cli-width": "^2.2.1",
-    "level-rocksdb": "^4.0.0"
+    "level-rocksdb": "^5.0.0"
   }
 }

@@ -35,9 +35,11 @@
 			'alpha',
 			'period_length',
 		];
+		$count_names = 11;
+		require(length($names) == $count_names, "wrong number of governable parameters");
 		
 		$is_allowed_name = $name => {
-			length(filter($names, 20, $n => $n == $name)) == 1
+			length(filter($names, $count_names, $n => $n == $name)) == 1
 		};
 
 		$get_value_key = $value => $value;
@@ -167,7 +169,7 @@
 					require($balance, "you have no deposited balance and cannot withdraw");
 					$amount = trigger.data.amount OTHERWISE $balance;
 					require($amount <= $balance, "your balance is only " || $balance);
-					foreach($names, 10, $name => {
+					foreach($names, $count_names, $name => {
 						require(!var['choice_' || trigger.address || '_' || $name], "support for " || $name || " not removed yet");
 					});
 				}`,

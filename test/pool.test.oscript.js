@@ -2552,6 +2552,151 @@ describe('Various trades in the pool', function () {
 		await this.checkTotals()
 	})
 
+	it('Alice removes support from swap_fee', async () => {
+		await this.network.timetravel({ shift: '30d' })
+
+		this.name = 'swap_fee'
+		this.value = 0.001
+
+		const { unit, error } = await this.alice.triggerAaWithData({
+			toAddress: this.governance_aa,
+			amount: 1e4,
+			spend_unconfirmed: 'all',
+			data: {
+				name: this.name,
+			}
+		})
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { response } = await this.network.getAaResponseToUnitOnNode(this.alice, unit)
+		expect(response.response.error).to.be.undefined
+		expect(response.bounced).to.be.false
+		expect(response.response_unit).to.be.null
+
+		const { vars: gvars } = await this.alice.readAAStateVars(this.governance_aa)
+		expect(gvars['support_' + this.name + '_' + this.value]).to.be.equal(0)
+		expect(gvars['support_' + this.name + '_' + this.value + '_' + this.aliceAddress]).to.be.undefined
+		expect(gvars['leader_' + this.name]).to.be.equal(this.value)
+		expect(gvars['balance_' + this.aliceAddress]).to.be.equal(this.amount)
+	})
+
+	it('Alice removes support from alpha', async () => {
+		this.name = 'alpha'
+		this.value = 0.3
+
+		const { unit, error } = await this.alice.triggerAaWithData({
+			toAddress: this.governance_aa,
+			amount: 1e4,
+			spend_unconfirmed: 'all',
+			data: {
+				name: this.name,
+			}
+		})
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { response } = await this.network.getAaResponseToUnitOnNode(this.alice, unit)
+		expect(response.response.error).to.be.undefined
+		expect(response.bounced).to.be.false
+		expect(response.response_unit).to.be.null
+
+		const { vars: gvars } = await this.alice.readAAStateVars(this.governance_aa)
+		expect(gvars['support_' + this.name + '_' + this.value]).to.be.equal(0)
+		expect(gvars['support_' + this.name + '_' + this.value + '_' + this.aliceAddress]).to.be.undefined
+		expect(gvars['leader_' + this.name]).to.be.equal(this.value)
+		expect(gvars['balance_' + this.aliceAddress]).to.be.equal(this.amount)
+	})
+
+	it('Alice removes support from pool_leverage', async () => {
+		if (this.mid_price)
+			return console.log("skipping because mid price is set");
+		this.name = 'pool_leverage'
+		this.value = this.pool_leverage
+
+		const { unit, error } = await this.alice.triggerAaWithData({
+			toAddress: this.governance_aa,
+			amount: 1e4,
+			spend_unconfirmed: 'all',
+			data: {
+				name: this.name,
+			}
+		})
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { response } = await this.network.getAaResponseToUnitOnNode(this.alice, unit)
+		expect(response.response.error).to.be.undefined
+		expect(response.bounced).to.be.false
+		expect(response.response_unit).to.be.null
+
+		const { vars: gvars } = await this.alice.readAAStateVars(this.governance_aa)
+		expect(gvars['support_' + this.name + '_' + this.value]).to.be.equal(0)
+		expect(gvars['support_' + this.name + '_' + this.value + '_' + this.aliceAddress]).to.be.undefined
+		expect(gvars['leader_' + this.name]).to.be.equal(this.value)
+		expect(gvars['balance_' + this.aliceAddress]).to.be.equal(this.amount)
+	})
+
+	it('Alice removes support from mid_price', async () => {
+		if (!this.mid_price)
+			return console.log("skipping because we are not range trading");
+		this.name = 'mid_price'
+		this.value = 70
+
+		const { unit, error } = await this.alice.triggerAaWithData({
+			toAddress: this.governance_aa,
+			amount: 1e4,
+			spend_unconfirmed: 'all',
+			data: {
+				name: this.name,
+			}
+		})
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { response } = await this.network.getAaResponseToUnitOnNode(this.alice, unit)
+		expect(response.response.error).to.be.undefined
+		expect(response.bounced).to.be.false
+		expect(response.response_unit).to.be.null
+
+		const { vars: gvars } = await this.alice.readAAStateVars(this.governance_aa)
+		expect(gvars['support_' + this.name + '_' + this.value]).to.be.equal(0)
+		expect(gvars['support_' + this.name + '_' + this.value + '_' + this.aliceAddress]).to.be.undefined
+		expect(gvars['leader_' + this.name]).to.be.equal(this.value)
+		expect(gvars['balance_' + this.aliceAddress]).to.be.equal(this.amount)
+	})
+
+	it('Alice withdraws from governance', async () => {
+		await this.timetravel()
+
+		const { unit, error } = await this.alice.triggerAaWithData({
+			toAddress: this.governance_aa,
+			amount: 1e4,
+			spend_unconfirmed: 'all',
+			data: {
+				withdraw: 1,
+			}
+		})
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { response } = await this.network.getAaResponseToUnitOnNode(this.alice, unit)
+		expect(response.response.error).to.be.undefined
+		expect(response.bounced).to.be.false
+		expect(response.response_unit).to.be.validUnit
+
+		const { unitObj } = await this.alice.getUnitInfo({ unit: response.response_unit })
+		expect(Utils.getExternalPayments(unitObj)).to.equalPayments([
+			{
+				asset: this.shares_asset,
+				address: this.aliceAddress,
+				amount: this.amount,
+			},
+		])
+
+		const { vars: gvars } = await this.alice.readAAStateVars(this.governance_aa)
+		expect(gvars['balance_' + this.aliceAddress]).to.be.equal(0)
+	})
 
 	it('Alice swaps x to y by delta x', async () => {
 		await this.timetravel()
