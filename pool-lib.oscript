@@ -165,6 +165,29 @@
 			$pre
 		};
 
+		// returns $v^($L-1)
+		$powL1 = ($v, $L) => {
+			if ($L == 2)
+				return $v;
+			$v2 = $v * $v;
+			$v5 = $v2 * $v2 * $v;
+			if ($L == 5)
+				return $v5/$v;
+			$v10 = $v5 * $v5;
+			if ($L == 10)
+				return $v10/$v;
+			$v20 = $v10 * $v10;
+			if ($L == 20)
+				return $v20/$v;
+			$v50 = $v20 * $v20 * $v10;
+			if ($L == 50)
+				return $v50/$v;
+			$v100 = $v50 * $v50;
+			if ($L == 100)
+				return $v100/$v;
+			bounce("unknown L=" || $L);
+		};
+
 
 		$charge_interest = ($balances, $l_balances, $profits, $x0, $y0, $last_ts, $i, $alpha, $Lambda) => {
 			require($last_ts, "no last ts");
@@ -189,8 +212,9 @@
 				if (!$xL AND !$yL)
 					return;
 				$factorL1 = $factor ? $pow($factor_powers, $L) / $factor : 0; // $factor^($L-1)
+				$factorL1L1 = $powL1($factorL1, $L); // charge ($L-1) times more since higher leverages have a ($L-1) factor in the utilization ratio
 				if ($xL){
-					$dxL = -$xL * (1 - $factorL1);
+					$dxL = -$xL * (1 - $factorL1L1);
 					$l_balances[$L||'x'].balance = $xL + $dxL;
 					// change in the amount lent out by the swap pool (swap pool's assets)
 					$delta_yn = $dxL * $p * ($L-1)/$L; // < 0
@@ -204,7 +228,7 @@
 					$charged_interest.x = $charged_interest.x - $dxL + $delta_yn / $p; // -$dxL / $L
 				}
 				if ($yL){
-					$dyL = -$yL * (1 - $factorL1);
+					$dyL = -$yL * (1 - $factorL1L1);
 					$l_balances[-$L||'x'].balance = $yL + $dyL;
 					// change in the amount lent out by the swap pool (swap pool's assets)
 					$delta_xn = $dyL / $p * ($L-1)/$L; // < 0

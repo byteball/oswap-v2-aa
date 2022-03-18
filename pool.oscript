@@ -2,7 +2,7 @@
 	doc_url: "https://oswap.io/pool-v2.json",
 	getters: `{
 
-		$pool_lib_aa = 'RBDKFNHV2SZ32RPFEWPVQMTGPV5S5EKV';
+		$pool_lib_aa = '7RDZ2WIY3QQILLYEZNS43ZUB7BLWANNV';
 		$pool_lib_by_price_aa = 'W4DQ3SJE2GRFO3R5YRU3XTHCQD5BQHCD';
 
 		$get_param = ($name, $default) => {
