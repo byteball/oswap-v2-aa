@@ -1,7 +1,7 @@
 {
 	doc_url: "https://oswap.io/pool-v2-factory.json",
 	init: `{
-		$pool_base_aa = '4J2SM2DVNCNZRA3G55LFFWOIEBUTN6AD';
+		$pool_base_aa = '5TH4FPE5DBA5A2F5SV3O7I3D6YX6XD2X';
 	}`,
 	messages: {
 		cases: [

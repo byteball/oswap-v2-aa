@@ -3,7 +3,7 @@
 
 		$get_leverages = () => [2, 5, 10, 20, 50, 100];
 
-		$singularity_threshold = 0.02;
+		$singularity_threshold = 0.01;
 
 		$trade_merge_period = 1; // seconds
 
