@@ -2,8 +2,8 @@
 	doc_url: "https://oswap.io/pool-v2.json",
 	getters: `{
 
-		$pool_lib_aa = '7RDZ2WIY3QQILLYEZNS43ZUB7BLWANNV';
-		$pool_lib_by_price_aa = 'W4DQ3SJE2GRFO3R5YRU3XTHCQD5BQHCD';
+		$pool_lib_aa = '5GG2PDVJ555WEUFGNPX55W2Z2T4P6BG5';
+		$pool_lib_by_price_aa = 'ASXH57GPNWI5FO5KJWJWLRMVZTXBRKJX';
 
 		$get_param = ($name, $default) => {
 			$value = var[$name];

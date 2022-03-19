@@ -343,6 +343,9 @@
 			$rounding_fee_X = $net_amount_X_exact - $net_amount_X;
 			$rounding_fee_Y = $amount_Y - $amount_Y_exact;
 			$total_fee = $fee + $rounding_fee_X;
+
+			$avg_price = $amount_Y / $net_amount_X;
+			require($avg_price > $P, "avg price below initial price");
 			
 			if ($min_amount_out)
 				require($net_amount_X >= $min_amount_out, "output amount " || $net_amount_X || " would be less than the expected minimum " || $min_amount_out);
