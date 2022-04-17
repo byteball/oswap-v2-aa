@@ -1,0 +1,197 @@
+/*
+Receive one asset, swap most of it to another asset on oswap, and send both the proceeds and the change to the destination address, along with optional data
+*/
+{
+	doc_url: "https://oswap.io/forwarder.json",
+	init: `{
+		$pool_lib_aa = '5GG2PDVJ555WEUFGNPX55W2Z2T4P6BG5';
+		$pool_lib_by_price_aa = 'ASXH57GPNWI5FO5KJWJWLRMVZTXBRKJX';
+		$pool_lib = $pool_lib_aa || '';
+		$pool_lib_by_price = $pool_lib_by_price_aa || '';
+
+		$non_bytes_asset = trigger.output[[asset!=base]].asset;
+		if ($non_bytes_asset == 'ambiguous')
+			bounce('ambiguous asset');
+		$asset = $non_bytes_asset == 'none' ? 'base' : $non_bytes_asset;
+
+		$data = trigger.data.data;
+	}`,
+
+	messages: {
+		cases: [
+
+			// forward
+			{
+				if: `{$data}`,
+				init: `{
+					$amount = trigger.output[[asset=$asset]];
+
+					$address = $data.address; // final recipient
+					$oswap_aa = $data.oswap_aa;
+					$data_to_forward = $data.data;
+
+					$definition = definition[$oswap_aa];
+					require($definition, "not an AA");
+
+					$params = $definition[1].params;
+					require($params, "no params");
+
+					$x_asset = $params.x_asset;
+					$y_asset = $params.y_asset;
+					require($x_asset == $asset OR $y_asset == $asset, "wrong asset received");
+
+					$get_param = ($name, $default) => {
+						$value = var[$oswap_aa][$name];
+						exists($value) ? $value : (exists($params[$name]) ? $params[$name] : $default)
+					};
+
+					$alpha = $get_param('alpha', 0.5);
+					$beta = 1 - $alpha;
+					$gamma = $get_param('price_deviation', 0);
+					$base_interest_rate = $get_param('base_interest_rate', 0.2);
+
+					$get_shifts = () => {
+						$mid_price = $get_param('mid_price', 0); // price of x_asset in terms of y_asset
+						if ($mid_price){
+							$lp_shares = var[$oswap_aa]['lp_shares'];
+							$s_curve = $lp_shares.linear * $lp_shares.coef;
+							$x0 = $s_curve / $mid_price^$beta / $gamma;
+							$y0 = $x0 * $mid_price;
+						}
+					//	else{
+					//		$x0 = 0;
+					//		$y0 = 0;
+					//	}
+						{x0: $x0, y0: $y0}
+					};
+
+
+					$get_denom = ($balances, $l_balances, $shifts, $pxy) => {
+						
+						$leverages = [2, 5, 10, 20, 50, 100];
+
+						// account for leveraged positions
+						$L_sums = {x: 0};
+						foreach($leverages, 6, $L => {
+							$L_sums.x = $L_sums.x + ($L - 1) * ($l_balances[$L||'x'].balance + $l_balances[-$L||'x'].balance / $pxy);
+						});
+
+						$denom = $beta * ($balances.x + $shifts.x0) - $L_sums.x;
+					//	log({denom: $denom, sum: $L_sums.x, share: $L_sums.x/$denom});
+						require($denom > 0, "negative denom " || $denom);
+						$denom
+					};
+
+					$balances = var[$oswap_aa]['balances'];
+					$l_balances = var[$oswap_aa]['leveraged_balances'] OTHERWISE {};
+					$profits = var[$oswap_aa]['profits'] OTHERWISE {};
+					$recent = var[$oswap_aa]['recent'] OTHERWISE {};
+
+					$shifts = $get_shifts();
+					$pxy = $alpha/$beta * ($balances.y + $shifts.y0) / ($balances.x + $shifts.x0);
+
+					$denom = $get_denom($balances, $l_balances, $shifts, $pxy);
+
+					$Lambda = $get_param('pool_leverage', 1);
+
+					$pool_props = {
+						alpha: $alpha,
+						beta: $beta,
+						Lambda: $Lambda,
+						swap_fee: $get_param('swap_fee', 0.003),
+						arb_profit_tax: $get_param('arb_profit_tax', 0),
+						period_length: $get_param('period_length', 3600),
+					};
+
+					if (length($l_balances)){
+						// charge interest accrued since the previous interaction
+						$i = $base_interest_rate / (1 - $pool_lib#1.$get_utilization_ratio($balances, $l_balances, $shifts.x0, $shifts.y0, $alpha));
+						$charged_interest = $pool_lib#1.$charge_interest($balances, $l_balances, $profits, $shifts.x0, $shifts.y0, $recent.last_ts, $i, $alpha, $Lambda);
+					}
+
+					$y_in = $asset == $y_asset;
+
+					$req = {share: 1, final_price: 0, found: false};
+
+					foreach([1, 2, 3, 4, 5], 5, $n => {
+						if ($req.found)
+							return;
+						if ($y_in){ // buying x
+							$y_amount = $amount;
+							$x_amount = $y_amount / $pxy;
+							$req.final_price = $pxy * (1 + $x_amount / $denom * $req.share);
+						}
+						else {
+							$x_amount = $amount;
+							$req.final_price = 1/$pxy * (1 + $x_amount/($denom + $beta * $Lambda * $x_amount) * $req.share);
+						}
+
+						// copy because they will be modified in each iteration
+						$_balances = $balances;
+						$_l_balances = $l_balances;
+						$_profits = $profits;
+						$_recent = $recent;
+
+						$res = $pool_lib_by_price#6.$swap($_balances, $_l_balances, $_profits, $_recent, $shifts.x0, $shifts.y0, $y_in, 0, $req.final_price, -1, 0, trigger.initial_address, $pool_props);
+						log('iteration', $n, 'required', $res.amount_Y, 'have', $amount);
+						
+						if ($res.amount_Y <= $amount)
+							$req.found = true;
+						else
+							$req.share = $req.share * $amount/$res.amount_Y * 0.95;
+					});
+					require($req.found, "failed to find suitable swap params");
+					$final_price = $req.final_price;
+
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: '{$asset}',
+							outputs: [{address: `{$oswap_aa}`, amount: `{$amount}`}]
+						}
+					},
+					{ // send additional 1000 bytes
+						if: `{$asset != 'base'}`,
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [{address: `{$oswap_aa}`, amount: 1000}]
+						}
+					},
+					{
+						app: 'data',
+						payload: {
+							final_price: `{$final_price}`,
+							hops: [{
+								address: `{$address}`,
+								change_address: `{$address}`,
+								data: `{$data_to_forward OTHERWISE ''}`,
+							}]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							response['message'] = 'forwarded';
+						}`
+					}
+				]
+			},
+
+			// just add bytes
+			{
+				if: `{$asset == 'base'}`,
+				messages: [
+					{
+						app: 'state',
+						state: `{
+							response['message'] = 'deposited';
+						}`
+					}
+				]
+			}
+		]
+	}
+}
