@@ -27,6 +27,7 @@ Receive one asset, swap most of it to another asset on oswap, and send both the 
 					$amount = trigger.output[[asset=$asset]];
 
 					$address = $data.address; // final recipient
+					$change_address = $data.change_address; // optional, the change from oswap goes here
 					$oswap_aa = $data.oswap_aa;
 					$data_to_forward = $data.data;
 
@@ -166,7 +167,7 @@ Receive one asset, swap most of it to another asset on oswap, and send both the 
 							final_price: `{$final_price}`,
 							hops: [{
 								address: `{$address}`,
-								change_address: `{$address}`,
+								change_address: `{$change_address OTHERWISE $address}`,
 								data: `{$data_to_forward OTHERWISE ''}`,
 							}]
 						}
