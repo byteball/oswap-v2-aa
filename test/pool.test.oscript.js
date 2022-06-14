@@ -117,6 +117,46 @@ describe('Various trades in the pool', function () {
 					expect(along_x || along_y).to.be.true
 			}
 		}
+
+		this.getGrowthFactor = () => {
+			if (this.mid_price)
+				return null;
+			const balances = this.balances;
+			const pxy = this.alpha / this.beta * balances.y / balances.x;
+		//	const mid_price_in_y = pxy ** this.alpha / this.alpha ** this.alpha / this.beta ** this.beta;
+			const mid_price_in_y = 2 * Math.sqrt(pxy);
+			const total_assets_in_y = balances.yn + pxy * balances.xn;
+			const share_price_in_mid = total_assets_in_y / this.linear_shares / mid_price_in_y;
+			const share_price_in_y = total_assets_in_y / this.linear_shares;
+			const share_price_in_x = share_price_in_y / pxy;
+			const x_leverage = balances.x / balances.xn
+			const y_leverage = balances.y / balances.yn
+			let asymmetric_shares;
+			let symmetric_balances = { ...balances };
+			if (x_leverage > y_leverage) { // y is underleveraged
+				const excess_y = balances.yn - balances.y / this.pool_leverage;
+				symmetric_balances.yn -= excess_y;
+				asymmetric_shares = excess_y / share_price_in_y;
+			}
+			else { // x is underleveraged
+				const excess_x = balances.xn - balances.x / this.pool_leverage;
+				symmetric_balances.xn -= excess_x;
+				asymmetric_shares = excess_x / share_price_in_x;
+			}
+			const symmetric_shares = this.linear_shares - asymmetric_shares;
+			const g = symmetric_balances.xn ** this.alpha * symmetric_balances.yn ** this.beta / symmetric_shares;
+			const asymmetry = asymmetric_shares / this.linear_shares;
+			const showDiff = (prev, curr) => {
+				const diff = curr - prev;
+				const sign = diff > 0 ? '+' : '';
+				return `${sign}${diff.toPrecision(3)}`;
+			}
+			console.log(`growth factor`, g, `(${showDiff(this.prev_g, g)})`, `asym=${(asymmetry * 100).toPrecision(4)}% (${showDiff(this.prev_asymmetry * 100, asymmetry * 100)}%)`, 'share price in mid', share_price_in_mid);
+			this.prev_g = g;
+			this.prev_asymmetry = asymmetry;
+			return g;
+		}
+
 	})
 
 	it('Bob defines a new pool', async () => {
@@ -295,6 +335,7 @@ describe('Various trades in the pool', function () {
 
 		this.checkBalancesLeverage()
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 	it('Alice adds more liquidity', async () => {
@@ -366,6 +407,7 @@ describe('Various trades in the pool', function () {
 
 		this.checkBalancesLeverage()
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 
@@ -441,6 +483,7 @@ describe('Various trades in the pool', function () {
 
 		this.checkBalancesLeverage()
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 
@@ -562,6 +605,7 @@ describe('Various trades in the pool', function () {
 
 		this.checkBalancesLeverage()
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 	it('Alice swaps again after 3 days, this time by delta y', async () => {
@@ -690,6 +734,7 @@ describe('Various trades in the pool', function () {
 
 		this.checkBalancesLeverage()
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 
@@ -817,6 +862,7 @@ describe('Various trades in the pool', function () {
 
 		this.checkBalancesLeverage()
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 
@@ -913,6 +959,7 @@ describe('Various trades in the pool', function () {
 
 		await this.timetravel()
 		await this.checkTotals(true)
+		this.getGrowthFactor()
 	})
 
 
@@ -1032,6 +1079,7 @@ describe('Various trades in the pool', function () {
 
 		this.checkBalancesLeverage()
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 
@@ -1152,6 +1200,7 @@ describe('Various trades in the pool', function () {
 
 		this.checkBalancesLeverage()
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 
@@ -1267,6 +1316,7 @@ describe('Various trades in the pool', function () {
 
 		this.checkBalancesLeverage()
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 
@@ -1411,6 +1461,7 @@ describe('Various trades in the pool', function () {
 
 		this.checkBalancesLeverage()
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 
@@ -1523,6 +1574,7 @@ describe('Various trades in the pool', function () {
 
 		this.checkBalancesLeverage()
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 	it('Alice buys more negative L-tokens', async () => {
@@ -1628,6 +1680,7 @@ describe('Various trades in the pool', function () {
 
 		this.checkBalancesLeverage()
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 
@@ -1786,6 +1839,7 @@ describe('Various trades in the pool', function () {
 		const final_price = await this.get_price('x')
 		console.log({ final_price, diff: final_price / initial_price - 1 })
 		expect(final_price).to.be.equalWithPrecision(initial_price, 5)
+		this.getGrowthFactor()
 	})
 
 
@@ -1884,6 +1938,7 @@ describe('Various trades in the pool', function () {
 
 		this.checkBalancesLeverage()
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 
@@ -2005,6 +2060,7 @@ describe('Various trades in the pool', function () {
 		await this.checkTotals()
 		console.log('leveraged_balances', vars.leveraged_balances)
 		console.log('profits', vars.profits)
+		this.getGrowthFactor()
 	})
 
 
@@ -2157,6 +2213,7 @@ describe('Various trades in the pool', function () {
 		expect(final_price).to.be.equalWithPrecision(initial_price, 12)
 
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 
@@ -2274,6 +2331,7 @@ describe('Various trades in the pool', function () {
 		const final_price = await this.get_price('x')
 		console.log({ final_price, diff: final_price / initial_price - 1 })
 		expect(final_price).to.be.equalWithPrecision(initial_price, 5)
+		this.getGrowthFactor()
 	})
 
 
@@ -2385,6 +2443,7 @@ describe('Various trades in the pool', function () {
 		const final_price = await this.get_price('x')
 		console.log({ final_price, diff: final_price / initial_price - 1 })
 		expect(final_price).to.be.equalWithPrecision(initial_price, 5)
+		this.getGrowthFactor()
 	})
 
 
@@ -2460,6 +2519,7 @@ describe('Various trades in the pool', function () {
 		expect(final_price).to.be.equalWithPrecision(initial_price, 12)
 
 		await this.checkTotals(false)
+		this.getGrowthFactor()
 	})
 
 
@@ -2680,6 +2740,7 @@ describe('Various trades in the pool', function () {
 		await this.checkTotals()
 		console.log('leveraged_balances', vars.leveraged_balances)
 		console.log('profits', vars.profits)
+		this.getGrowthFactor()
 	})
 
 
@@ -2770,6 +2831,7 @@ describe('Various trades in the pool', function () {
 		expect(this.balances.y / this.pool_leverage / this.balances.yn).to.be.equalWithPrecision(1, 8)
 
 		await this.checkTotals()
+		this.getGrowthFactor()
 	})
 
 
