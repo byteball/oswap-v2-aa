@@ -170,7 +170,7 @@
 					$amount = trigger.data.amount OTHERWISE $balance;
 					require($amount <= $balance, "your balance is only " || $balance);
 					foreach($names, $count_names, $name => {
-						require(!var['choice_' || trigger.address || '_' || $name], "support for " || $name || " not removed yet");
+						require(!exists(var['choice_' || trigger.address || '_' || $name]), "support for " || $name || " not removed yet");
 					});
 				}`,
 				messages: [
