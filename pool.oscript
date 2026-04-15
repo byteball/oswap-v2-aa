@@ -425,7 +425,7 @@
 			// in some dendrites, we don't write balances and l_balances and don't update last_ts. Then, the charge is not applied and will be recalculated in the next call
 		}
 
-		$governance_base_aa = 'KXQFOINIUBXIBGFNZ5SCHMPJLX4LJHSV';
+		$governance_base_aa = '2VIJPS2HCEFIPNFTLQ2GBM42I4XVJV3N';
 	}",
 	messages: {
 		cases: [
